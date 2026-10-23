@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Transmanga</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;700;900&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#0b0f17; --panel:#141b26; --line:#243042; --text:#e5e9f0; --muted:#8b97a8; --accent:#3b82f6; --ok:#22c55e; --err:#ef4444; }
+  * { box-sizing:border-box; }
+  html { scroll-behavior:smooth; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:Cairo, system-ui, sans-serif; }
+  header { position:sticky; top:0; z-index:10; display:flex; gap:8px; padding:10px 16px; background:rgba(11,15,23,.92); backdrop-filter:blur(8px); border-bottom:1px solid var(--line); }
+  input { flex:1; min-width:0; padding:10px 12px; border-radius:10px; border:1px solid var(--line); background:var(--panel); color:var(--text); font:inherit; direction:ltr; }
+  button { padding:10px 14px; border:0; border-radius:10px; background:var(--accent); color:#fff; font:inherit; font-weight:700; cursor:pointer; white-space:nowrap; }
+  button.ghost { background:var(--panel); border:1px solid var(--line); }
+  button:disabled { opacity:.5; cursor:default; }
+  #status { text-align:center; color:var(--muted); padding:8px 16px; font-size:.9rem; min-height:1.5em; }
+  #reader { max-width:900px; margin:0 auto; padding-bottom:80px; }
+  .page { position:relative; min-height:300px; background:#000; contain:layout paint; }
+  .page img { display:block; width:100%; height:auto; }
+  .badge { position:absolute; top:8px; left:8px; padding:3px 10px; border-radius:999px; font-size:.75rem; background:rgba(0,0,0,.7); color:#fff; cursor:pointer; user-select:none; }
+  .badge.ok { background:rgba(34,197,94,.85); }
+  .badge.err { background:rgba(239,68,68,.9); }
+  #fab { position:fixed; bottom:16px; left:16px; display:flex; flex-direction:column; gap:8px; z-index:10; }
+  #fab button { width:48px; height:48px; padding:0; border-radius:50%; font-size:1.1rem; box-shadow:0 4px 14px rgba(0,0,0,.5); }
+  dialog { background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:14px; width:min(480px, calc(100vw - 32px)); }
+  dialog label { display:block; margin:10px 0 4px; font-size:.9rem; color:var(--muted); }
+  dialog input { width:100%; }
+  dialog .row { display:flex; gap:8px; margin-top:16px; justify-content:flex-start; }
+  .hint { font-size:.8rem; color:var(--muted); margin-top:12px; line-height:1.6; }
+</style>
+</head>
+<body>
+<header>
+  <input id="url" type="url" placeholder="الصق رابط فصل المانغا هنا..." autocomplete="off">
+  <button id="go">ترجم</button>
+  <button id="settingsBtn" class="ghost" title="الإعدادات">⚙</button>
+</header>
+<div id="status">ضع رابط أي فصل مانغا، وسيتم سحب الصفحات وترجمتها تلقائياً إلى العربية.</div>
+<main id="reader"></main>
+
+<div id="fab" hidden>
+  <button id="autoBtn" title="تمرير تلقائي">▶</button>
+  <button id="topBtn" class="ghost" title="للأعلى">↑</button>
+</div>
+
+<dialog id="settings">
+  <form method="dialog">
+    <h3 style="margin:0">الإعدادات</h3>
+    <label>مفتاح Gemini API</label>
+    <input id="geminiKey" type="password" placeholder="AIza...">
+    <label>نموذج Gemini</label>
+    <input id="geminiModel" placeholder="gemini-3.8-flash">
+    <label>مفتاح Groq API (احتياطي)</label>
+    <input id="grokKey" type="password" placeholder="gsk_...">
+    <label>نموذج Groq</label>
+    <input id="grokModel" placeholder="qwen/qwen3.8-27b">
+    <label>سرعة التمرير التلقائي (بكسل/ثانية)</label>
+    <input id="scrollSpeed" type="number" min="20" max="2000" placeholder="120">
+    <div class="hint">المفاتيح تُحفظ في متصفحك فقط وتُرسل مباشرة إلى Google و Groq. اضغط على شارة أي صفحة للتبديل بين الأصل والترجمة، أو لإعادة المحاولة عند الفشل.</div>
+    <div class="row"><button value="save">حفظ</button><button value="cancel" class="ghost">إلغاء</button></div>
+  </form>
+</dialog>
+
+<script>
+const BACKEND = "https://diajb-manga.hf.space";
+const proxied = u => `${BACKEND}/api/proxy?img=${encodeURIComponent(u)}`;
+const $ = id => document.getElementById(id);
+const status = t => $('status').textContent = t;
+
+// ---------- الإعدادات ----------
+const FIELDS = { geminiKey:'', geminiModel:'gemini-3.8-flash', grokKey:'', grokModel:'qwen/qwen3.8-27b', scrollSpeed:'120' };
+const cfg = {};
+for (const k in FIELDS) { try { cfg[k] = localStorage.getItem('tm2_' + k) || FIELDS[k]; } catch { cfg[k] = FIELDS[k]; } }
+$('settingsBtn').onclick = () => { for (const k in FIELDS) $(k).value = cfg[k]; $('settings').showModal(); };
+$('settings').addEventListener('close', () => {
+  if ($('settings').returnValue !== 'save') return;
+  for (const k in FIELDS) { cfg[k] = $(k).value.trim() || FIELDS[k]; try { localStorage.setItem('tm2_' + k, cfg[k]); } catch {} }
+});
+
+// ---------- سحب صور الفصل ----------
+async function getChapterImages(url) {
+  try {
+    const r = await fetch(`${BACKEND}/api/chapter?url=${encodeURIComponent(url)}`);
+    const d = await r.json();
+    if (d.success && d.images && d.images.length) return d.images;
+  } catch {}
+  // احتياط: نجلب الصفحة عبر البروكسي ونستخرج الصور بأنفسنا
+  const html = await (await fetch(proxied(url))).text();
+  return extractImages(html, url);
+}
+
+function extractImages(html, base) {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const urls = [];
+  const add = s => {
+    s = (s || '').trim().split(/\s+/)[0];
+    if (!s || s.startsWith('data:')) return;
+    try { urls.push(new URL(s, base).href); } catch {}
+  };
+  for (const img of doc.querySelectorAll('img')) {
+    for (const a of img.getAttributeNames()) if (/src|original|lazy|url/i.test(a) && a !== 'srcset') add(img.getAttribute(a));
+  }
+  // صور مخفية داخل سكربتات (مواقع تحمّل الصفحات عبر JS)
+  for (const m of html.matchAll(/https?:\\?\/\\?\/[^"'\s<>()]+?\.(?:jpe?g|png|webp|avif)(?:\?[^"'\s<>()]*)?/gi)) add(m[0].replace(/\\\//g, '/'));
+  const clean = [...new Set(urls)].filter(u => /\.(jpe?g|png|webp|avif|gif)(\?|$)/i.test(u) && !/gravatar|avatar|logo|icon|banner|sticker|emoji|\/ads?\//i.test(u));
+  // صفحات الفصل عادة تشترك في نفس المجلد: نختار أكبر مجموعة
+  const groups = {};
+  for (const u of clean) (groups[u.slice(0, u.lastIndexOf('/'))] ||= []).push(u);
+  const best = Object.values(groups).sort((a, b) => b.length - a.length)[0] || [];
+  return best.length >= 2 ? best : clean;
+}
+
+// ---------- الترجمة ----------
+const PROMPT = `You are an expert manga/manhwa translator and typesetter.
+Find EVERY piece of readable text in this image: speech bubbles, narration boxes, thoughts, signs and short sound effects.
+For each one return an object:
+- "box_2d": [ymin, xmin, ymax, xmax] normalized 0-1000, tightly covering only that text (one box per bubble/caption, merge lines of the same bubble).
+- "en": the original text.
+- "ar": a professional, natural Arabic translation (clear Modern Standard Arabic, conversational where the tone is casual). Keep each character's tone and emotion, transliterate names, adapt idioms instead of literal translation, keep it concise so it fits the bubble.
+Return ONLY a JSON array. If there is no text, return [].`;
+
+function parseBlocks(text) {
+  const m = String(text).match(/\[[\s\S]*\]/);
+  const arr = JSON.parse(m ? m[0] : text);
+  if (!Array.isArray(arr)) throw new Error('رد غير صالح');
+  return arr.filter(b => Array.isArray(b.box_2d) && b.box_2d.length === 4 && b.ar);
+}
+
+async function viaGemini(b64) {
+  if (!cfg.geminiKey) throw new Error('لا يوجد مفتاح Gemini');
+  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${cfg.geminiModel}:generateContent?key=${encodeURIComponent(cfg.geminiKey)}`, {
+    method:'POST', headers:{ 'Content-Type':'application/json' },
+    body: JSON.stringify({
+      contents:[{ parts:[{ inline_data:{ mime_type:'image/jpeg', data:b64 } }, { text:PROMPT }] }],
+      generationConfig:{ responseMimeType:'application/json', temperature:0.3 }
+    })
+  });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error?.message || 'Gemini HTTP ' + r.status);
+  return parseBlocks(d.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '[]');
+}
+
+async function viaGrok(b64) {
+  if (!cfg.grokKey) throw new Error('لا يوجد مفتاح Groq');
+  const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method:'POST', headers:{ 'Content-Type':'application/json', Authorization:'Bearer ' + cfg.grokKey },
+    body: JSON.stringify({
+      model: cfg.grokModel, temperature:0.3,
+      messages:[{ role:'user', content:[{ type:'image_url', image_url:{ url:'data:image/jpeg;base64,' + b64 } }, { type:'text', text:PROMPT }] }]
+    })
+  });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error?.message || d.error || 'Groq HTTP ' + r.status);
+  return parseBlocks(d.choices?.[0]?.message?.content || '[]');
+}
+
+async function translateSlice(b64) {
+  try { return await viaGemini(b64); }
+  catch (e) {
+    console.warn('Gemini failed, using Groq:', e.message);
+    try { return await viaGrok(b64); }
+    catch (e2) { throw new Error(`Gemini: ${e.message} | Groq: ${e2.message}`); }
+  }
+}
+
+// ---------- الرسم فوق الصورة ----------
+function sampleBg(ctx, x, y, w, h) {
+  // متوسط ألوان حواف المربع = لون خلفية الفقاعة تقريباً
+  const pts = [], step = 4;
+  const px = (a, b) => pts.push(ctx.getImageData(Math.max(0, a | 0), Math.max(0, b | 0), 1, 1).data);
+  for (let i = 0; i <= step; i++) {
+    px(x + w * i / step, y); px(x + w * i / step, y + h - 1);
+    px(x, y + h * i / step); px(x + w - 1, y + h * i / step);
+  }
+  const c = [0, 1, 2].map(k => pts.map(p => p[k]).sort((a, b) => a - b)[pts.length >> 1]);
+  return c;
+}
+
+function wrapLines(ctx, text, maxW) {
+  const words = text.split(/\s+/), lines = [];
+  let line = '';
+  for (const w of words) {
+    const t = line ? line + ' ' + w : w;
+    if (ctx.measureText(t).width <= maxW || !line) line = t; else { lines.push(line); line = w; }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function drawBlock(ctx, b, ox, oy, sw, sh) {
+  const [y0, x0, y1, x1] = b.box_2d.map(Number);
+  const pad = 0.012 * sw;
+  const x = ox + x0 / 1000 * sw - pad, y = oy + y0 / 1000 * sh - pad;
+  const w = (x1 - x0) / 1000 * sw + pad * 2, h = (y1 - y0) / 1000 * sh + pad * 2;
+  if (!(w > 4 && h > 4)) return;
+  const [r, g, bl] = sampleBg(ctx, x, y, w, h);
+  const dark = (r * 299 + g * 587 + bl * 114) / 1000 < 128;
+  ctx.fillStyle = `rgb(${r},${g},${bl})`;
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, Math.min(w, h) * 0.2); ctx.fill();
+
+  ctx.direction = 'rtl'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  let size = Math.min(h * 0.6, w * 0.35, sw * 0.06), lines;
+  for (; size > 9; size *= 0.92) {
+    ctx.font = `700 ${size}px Cairo`;
+    lines = wrapLines(ctx, b.ar, w * 0.92);
+    if (lines.length * size * 1.25 <= h * 0.95 && lines.every(l => ctx.measureText(l).width <= w * 0.98)) break;
+  }
+  ctx.font = `700 ${size}px Cairo`;
+  lines = wrapLines(ctx, b.ar, w * 0.92);
+  const lh = size * 1.25, top = y + h / 2 - (lines.length - 1) * lh / 2;
+  ctx.lineJoin = 'round'; ctx.lineWidth = Math.max(2, size * 0.15);
+  ctx.strokeStyle = dark ? '#000' : '#fff'; ctx.fillStyle = dark ? '#fff' : '#111';
+  lines.forEach((l, i) => { ctx.strokeText(l, x + w / 2, top + i * lh); ctx.fillText(l, x + w / 2, top + i * lh); });
+}
+
+async function translatePage(page) {
+  const { src, img, badge } = page;
+  const cacheKey = 'tm_tr_' + src;
+  badge.className = 'badge'; badge.textContent = 'جارٍ الترجمة...';
+  const blob = await (await fetch(proxied(src))).blob();
+  const bmp = await createImageBitmap(blob);
+  const canvas = document.createElement('canvas');
+  canvas.width = bmp.width; canvas.height = bmp.height;
+  const ctx = canvas.getContext('2d', { willReadFrequently:true });
+  ctx.drawImage(bmp, 0, 0);
+
+  // صفحات الويبتون الطويلة تُقسّم لشرائح كي يقرأها النموذج بدقة
+  // shortcut: فقاعة تقع على حد شريحتين قد تُترجم مقسومة، أضف تداخلاً بين الشرائح إن ظهرت المشكلة كثيراً
+  const sliceH = Math.min(canvas.height, Math.round(canvas.width * 1.6));
+  const slices = [];
+  for (let y = 0; y < canvas.height; y += sliceH) slices.push([y, Math.min(sliceH, canvas.height - y)]);
+
+  let cached = null;
+  try { cached = JSON.parse(localStorage.getItem(cacheKey)); } catch {}
+  const results = cached || [];
+  if (!cached) {
+    for (let i = 0; i < slices.length; i++) {
+      const [sy, sh] = slices[i];
+      const c = document.createElement('canvas');
+      const scale = Math.min(1, 1600 / Math.max(canvas.width, sh));
+      c.width = canvas.width * scale; c.height = sh * scale;
+      c.getContext('2d').drawImage(canvas, 0, sy, canvas.width, sh, 0, 0, c.width, c.height);
+      badge.textContent = `جارٍ الترجمة ${slices.length > 1 ? `${i + 1}/${slices.length}` : ''}...`;
+      results.push(await translateSlice(c.toDataURL('image/jpeg', 0.9).split(',')[1]));
+    }
+    try { localStorage.setItem(cacheKey, JSON.stringify(results)); } catch {}
+  }
+
+  await document.fonts.load('700 20px Cairo');
+  slices.forEach(([sy, sh], i) => (results[i] || []).forEach(b => drawBlock(ctx, b, 0, sy, canvas.width, sh)));
+  const out = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.92));
+  page.translated = URL.createObjectURL(out);
+  img.src = page.translated;
+  const n = results.flat().length;
+  badge.className = 'badge ok'; badge.textContent = n ? `مترجمة (${n})` : 'لا نص';
+}
+
+// ---------- القارئ وطابور الترجمة ----------
+let pages = [], queue = [], running = 0, session = 0;
+const CONCURRENCY = 2;
+
+function pump(sid) {
+  while (sid === session && running < CONCURRENCY && queue.length) {
+    const page = queue.shift();
+    running++;
+    translatePage(page)
+      .catch(e => { page.badge.className = 'badge err'; page.badge.textContent = 'فشل — اضغط لإعادة المحاولة'; page.badge.title = e.message; console.error(e); })
+      .finally(() => { running--; updateProgress(); pump(sid); });
+  }
+}
+
+function updateProgress() {
+  const done = pages.filter(p => p.translated).length;
+  status(`تمت ترجمة ${done} من ${pages.length} صفحة` + (done === pages.length ? ' ✓' : ''));
+}
+
+// الصفحات القريبة من الشاشة تتقدّم في الطابور
+const io = new IntersectionObserver(entries => {
+  for (const e of entries) if (e.isIntersecting) {
+    const p = pages[e.target.dataset.i], qi = queue.indexOf(p);
+    if (qi > 0) { queue.splice(qi, 1); queue.unshift(p); }
+  }
+}, { rootMargin:'1500px 0px' });
+
+async function load() {
+  const url = $('url').value.trim();
+  if (!/^https?:\/\//i.test(url)) return status('أدخل رابطاً صحيحاً يبدأ بـ http');
+  if (!cfg.geminiKey && !cfg.grokKey) { status('أضف مفتاح Gemini أو Groq من الإعدادات أولاً'); return $('settingsBtn').click(); }
+  const sid = ++session;
+  queue = []; io.disconnect();
+  $('reader').innerHTML = ''; $('go').disabled = true;
+  status('جارٍ سحب صفحات الفصل...');
+  try {
+    const imgs = await getChapterImages(url);
+    if (sid !== session) return;
+    if (!imgs.length) throw new Error('لم يتم العثور على صور في هذا الرابط');
+    pages = imgs.map((src, i) => {
+      const el = document.createElement('div'); el.className = 'page'; el.dataset.i = i;
+      const img = new Image(); img.loading = i < 3 ? 'eager' : 'lazy'; img.decoding = 'async'; img.alt = `صفحة ${i + 1}`;
+      img.src = proxied(src);
+      img.onload = () => el.style.minHeight = '0';
+      const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = `${i + 1} — في الانتظار`;
+      const page = { src, img, badge, translated:null, showOriginal:false };
+      badge.onclick = () => {
+        if (page.translated) { page.showOriginal = !page.showOriginal; img.src = page.showOriginal ? proxied(src) : page.translated; badge.textContent = page.showOriginal ? 'الأصل' : 'مترجمة'; }
+        else if (badge.classList.contains('err')) { queue.unshift(page); pump(session); }
+      };
+      el.append(img, badge); $('reader').append(el); io.observe(el);
+      return page;
+    });
+    $('fab').hidden = false;
+    queue = [...pages];
+    updateProgress();
+    pump(sid);
+  } catch (e) { status('خطأ: ' + e.message); }
+  finally { $('go').disabled = false; }
+}
+$('go').onclick = load;
+$('url').addEventListener('keydown', e => e.key === 'Enter' && load());
+
+// ---------- محرك التمرير السلس ----------
+let auto = false, last = 0;
+function tick(t) {
+  if (!auto) return;
+  if (last) window.scrollBy(0, (t - last) / 1000 * Number(cfg.scrollSpeed));
+  last = t;
+  if (innerHeight + scrollY >= document.body.scrollHeight - 2) toggleAuto(false);
+  else requestAnimationFrame(tick);
+}
+function toggleAuto(on = !auto) {
+  auto = on; last = 0; $('autoBtn').textContent = auto ? '❚❚' : '▶';
+  document.documentElement.style.scrollBehavior = auto ? 'auto' : '';
+  if (auto) requestAnimationFrame(tick);
+}
+$('autoBtn').onclick = () => toggleAuto();
+$('topBtn').onclick = () => { toggleAuto(false); scrollTo({ top:0 }); };
+// لمس الشاشة يوقف التمرير التلقائي، والمسافة/الأسهم تقلب بسلاسة
+addEventListener('touchstart', () => auto && toggleAuto(false), { passive:true });
+addEventListener('wheel', () => auto && toggleAuto(false), { passive:true });
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key === ' ' || e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    scrollBy({ top:(e.key === 'ArrowUp' ? -1 : 1) * innerHeight * 0.85, behavior:'smooth' });
+  }
+});
+</script>
+</body>
+</html>
