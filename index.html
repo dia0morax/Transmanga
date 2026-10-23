@@ -53,14 +53,14 @@
     <label>مفتاح Gemini API</label>
     <input id="geminiKey" type="password" placeholder="AIza...">
     <label>نموذج Gemini</label>
-    <input id="geminiModel" placeholder="gemini-2.5-flash">
-    <label>مفتاح Grok API (احتياطي)</label>
-    <input id="grokKey" type="password" placeholder="xai-...">
-    <label>نموذج Grok</label>
-    <input id="grokModel" placeholder="grok-4">
+    <input id="geminiModel" placeholder="gemini-3.8-flash">
+    <label>مفتاح Groq API (احتياطي)</label>
+    <input id="grokKey" type="password" placeholder="gsk_...">
+    <label>نموذج Groq</label>
+    <input id="grokModel" placeholder="qwen/qwen3.8-27b">
     <label>سرعة التمرير التلقائي (بكسل/ثانية)</label>
     <input id="scrollSpeed" type="number" min="20" max="2000" placeholder="120">
-    <div class="hint">المفاتيح تُحفظ في متصفحك فقط وتُرسل مباشرة إلى Google و xAI. اضغط على شارة أي صفحة للتبديل بين الأصل والترجمة، أو لإعادة المحاولة عند الفشل.</div>
+    <div class="hint">المفاتيح تُحفظ في متصفحك فقط وتُرسل مباشرة إلى Google و Groq. اضغط على شارة أي صفحة للتبديل بين الأصل والترجمة، أو لإعادة المحاولة عند الفشل.</div>
     <div class="row"><button value="save">حفظ</button><button value="cancel" class="ghost">إلغاء</button></div>
   </form>
 </dialog>
@@ -72,13 +72,13 @@ const $ = id => document.getElementById(id);
 const status = t => $('status').textContent = t;
 
 // ---------- الإعدادات ----------
-const FIELDS = { geminiKey:'', geminiModel:'gemini-2.5-flash', grokKey:'', grokModel:'grok-4', scrollSpeed:'120' };
+const FIELDS = { geminiKey:'', geminiModel:'gemini-3.8-flash', grokKey:'', grokModel:'qwen/qwen3.8-27b', scrollSpeed:'120' };
 const cfg = {};
-for (const k in FIELDS) { try { cfg[k] = localStorage.getItem('tm_' + k) || FIELDS[k]; } catch { cfg[k] = FIELDS[k]; } }
+for (const k in FIELDS) { try { cfg[k] = localStorage.getItem('tm2_' + k) || FIELDS[k]; } catch { cfg[k] = FIELDS[k]; } }
 $('settingsBtn').onclick = () => { for (const k in FIELDS) $(k).value = cfg[k]; $('settings').showModal(); };
 $('settings').addEventListener('close', () => {
   if ($('settings').returnValue !== 'save') return;
-  for (const k in FIELDS) { cfg[k] = $(k).value.trim() || FIELDS[k]; try { localStorage.setItem('tm_' + k, cfg[k]); } catch {} }
+  for (const k in FIELDS) { cfg[k] = $(k).value.trim() || FIELDS[k]; try { localStorage.setItem('tm2_' + k, cfg[k]); } catch {} }
 });
 
 // ---------- سحب صور الفصل ----------
@@ -145,25 +145,25 @@ async function viaGemini(b64) {
 }
 
 async function viaGrok(b64) {
-  if (!cfg.grokKey) throw new Error('لا يوجد مفتاح Grok');
-  const r = await fetch('https://api.x.ai/v1/chat/completions', {
+  if (!cfg.grokKey) throw new Error('لا يوجد مفتاح Groq');
+  const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method:'POST', headers:{ 'Content-Type':'application/json', Authorization:'Bearer ' + cfg.grokKey },
     body: JSON.stringify({
       model: cfg.grokModel, temperature:0.3,
-      messages:[{ role:'user', content:[{ type:'image_url', image_url:{ url:'data:image/jpeg;base64,' + b64, detail:'high' } }, { type:'text', text:PROMPT }] }]
+      messages:[{ role:'user', content:[{ type:'image_url', image_url:{ url:'data:image/jpeg;base64,' + b64 } }, { type:'text', text:PROMPT }] }]
     })
   });
   const d = await r.json();
-  if (!r.ok) throw new Error(d.error?.message || d.error || 'Grok HTTP ' + r.status);
+  if (!r.ok) throw new Error(d.error?.message || d.error || 'Groq HTTP ' + r.status);
   return parseBlocks(d.choices?.[0]?.message?.content || '[]');
 }
 
 async function translateSlice(b64) {
   try { return await viaGemini(b64); }
   catch (e) {
-    console.warn('Gemini failed, using Grok:', e.message);
+    console.warn('Gemini failed, using Groq:', e.message);
     try { return await viaGrok(b64); }
-    catch (e2) { throw new Error(`Gemini: ${e.message} | Grok: ${e2.message}`); }
+    catch (e2) { throw new Error(`Gemini: ${e.message} | Groq: ${e2.message}`); }
   }
 }
 
@@ -289,7 +289,7 @@ const io = new IntersectionObserver(entries => {
 async function load() {
   const url = $('url').value.trim();
   if (!/^https?:\/\//i.test(url)) return status('أدخل رابطاً صحيحاً يبدأ بـ http');
-  if (!cfg.geminiKey && !cfg.grokKey) { status('أضف مفتاح Gemini أو Grok من الإعدادات أولاً'); return $('settingsBtn').click(); }
+  if (!cfg.geminiKey && !cfg.grokKey) { status('أضف مفتاح Gemini أو Groq من الإعدادات أولاً'); return $('settingsBtn').click(); }
   const sid = ++session;
   queue = []; io.disconnect();
   $('reader').innerHTML = ''; $('go').disabled = true;
